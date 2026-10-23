@@ -12,6 +12,7 @@ import type { EdgeOptions, ThemeId } from "./theme";
 import { edgeFromFrontmatter, isThemeId } from "./theme";
 import type MindMapPlugin from "./main";
 import { indentString, ToolbarPosition } from "./settings";
+import { LinkExpandController } from "./link-expand-controller";
 
 export const VIEW_TYPE_MINDMAP = "mindmap";
 
@@ -23,6 +24,8 @@ export class MindMapView extends TextFileView {
   private outlineHost: HTMLElement | null = null;
   private history = new History();
   private doc: MindDoc | null = null;
+  /** 链接展开子树的控制器（纯内存状态） */
+  private linkExpand: LinkExpandController | null = null;
 
   constructor(leaf: WorkspaceLeaf, private plugin: MindMapPlugin) {
     super(leaf);
@@ -140,11 +143,15 @@ export class MindMapView extends TextFileView {
     });
     this.outlineHost = this.contentEl.createDiv({ cls: "mm-outline-host" });
     const host = this.contentEl.createDiv({ cls: "mm-canvas-host" });
+    this.linkExpand = new LinkExpandController(this, this.plugin);
     this.canvas = new MindMapCanvas(host, {
       structure: this.plugin.settings.defaultStructure,
       theme: this.plugin.settings.defaultTheme,
       editable: true,
-      host: this.plugin.canvasHost(() => this.file?.path ?? "", this, this),
+      host: {
+        ...this.plugin.canvasHost(() => this.file?.path ?? "", this, this),
+        ...this.linkExpand.hostMethods(),
+      },
       onChange: (doc) => this.onDocChange(doc),
       onUndo: () => this.undo(),
       onRedo: () => this.redo(),
@@ -162,6 +169,9 @@ export class MindMapView extends TextFileView {
         this.plugin.applyToolbarPosition(this);
       },
     });
+    // 控制器持有画布引用并注册目标笔记变化监听；漏了这行会导致 isLive 恒为 false，
+    // 展开结果全部被误判作废（「点徽标没反应」的根因）
+    this.linkExpand.bind(this.canvas);
     if (this.plugin.settings.outlineOpen) this.openOutline();
   }
 
@@ -178,6 +188,8 @@ export class MindMapView extends TextFileView {
     await super.onClose();
     this.outline?.destroy();
     this.outline = null;
+    this.linkExpand?.destroy();
+    this.linkExpand = null;
     this.canvas?.destroy();
     this.canvas = null;
   }
@@ -267,6 +279,8 @@ export class MindMapView extends TextFileView {
     });
     this.applyFrontmatterOptions(this.doc);
     this.canvas?.setDoc(this.doc);
+    // 源文件（重新）解析后，把挂着的链接展开按文字链重新接回去
+    void this.linkExpand?.reapply();
   }
 
   /**
@@ -350,6 +364,7 @@ export class MindMapView extends TextFileView {
     });
     this.applyFrontmatterOptions(this.doc);
     this.canvas?.setDoc(this.doc);
+    void this.linkExpand?.reapply();
   }
 
 }

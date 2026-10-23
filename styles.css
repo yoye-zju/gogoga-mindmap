@@ -377,6 +377,48 @@
 }
 .mm-note-icon:hover { opacity: 1; }
 
+/* 链接展开：虚拟子树只读展示，虚线边框与真实节点区分 */
+.mm-node.is-virtual {
+  border-style: dashed;
+  cursor: default;
+}
+.mm-node.is-virtual.is-selected {
+  cursor: default;
+}
+/* 展开徽标：可展开的链接节点上的一枚小图标；已展开时减淡表示再点收起 */
+.mm-expand-badge {
+  all: unset;
+  display: inline-flex;
+  font-size: 0.95em;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+}
+.mm-expand-badge .mm-icon { display: flex; }
+.mm-expand-badge:hover { opacity: 1; }
+.mm-expand-badge.is-expanded { opacity: 0.35; }
+.mm-expand-badge.is-expanded:hover { opacity: 0.85; }
+/* 点击后到子树出现之间要读一次文件：这段时间让徽标呼吸一下，表示「收到了，正在展开」 */
+.mm-expand-badge.is-loading { opacity: 1; animation: mm-badge-pulse 0.6s ease-in-out infinite; }
+@keyframes mm-badge-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.25); }
+}
+/* 虚拟根上的「打开目标」按钮 */
+.mm-open-target {
+  font-size: 0.95em;
+  opacity: 0.6;
+  cursor: pointer;
+}
+.mm-open-target:hover { opacity: 1; }
+/* 「展开更多」占位节点 */
+.mm-node.is-more-node {
+  opacity: 0.7;
+  font-style: italic;
+}
+.mm-node.is-more-node:hover { opacity: 1; }
+
 /* 折叠按钮：挂在节点外侧，短线连到节点 */
 .mm-toggle {
   all: unset;

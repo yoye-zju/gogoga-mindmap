@@ -7,7 +7,7 @@
 import type { MindMapCanvas } from "./canvas";
 import { t } from "./i18n";
 import { plainText } from "./inline";
-import { MindNode, visibleChildren } from "./model";
+import { isVirtualNode, MindNode, visibleChildren } from "./model";
 
 export class OutlinePanel {
   readonly el: HTMLElement;
@@ -103,7 +103,10 @@ export class OutlinePanel {
       });
       this.list.append(row);
       this.rows.set(node.id, row);
-      for (const c of visibleChildren(node)) visit(c);
+      for (const c of visibleChildren(node)) {
+        if (isVirtualNode(c)) continue; // 虚拟子树不出现在大纲里
+        visit(c);
+      }
     };
     visit(doc.root);
     this.list.scrollTop = scroll;
@@ -124,7 +127,10 @@ export class OutlinePanel {
     const out: MindNode[] = [];
     const visit = (n: MindNode) => {
       out.push(n);
-      for (const c of visibleChildren(n)) visit(c);
+      for (const c of visibleChildren(n)) {
+        if (isVirtualNode(c)) continue;
+        visit(c);
+      }
     };
     visit(doc.root);
     return out;

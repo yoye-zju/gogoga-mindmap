@@ -12,7 +12,7 @@
  * 对非规范格式的文件只规范化空行和缩进，不丢内容。
  */
 
-import { Boundary, createNode, Summary, DocStyle, MindDoc, MindNode, NODE_MAX_WIDTH, NODE_MIN_WIDTH, NodeKind, normalizeBoxes } from "./model";
+import { Boundary, createNode, isVirtualNode, Summary, DocStyle, MindDoc, MindNode, NODE_MAX_WIDTH, NODE_MIN_WIDTH, NodeKind, normalizeBoxes } from "./model";
 
 export const COLOR_NAMES = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "gray"] as const;
 export type ColorName = (typeof COLOR_NAMES)[number];
@@ -459,7 +459,8 @@ export function serializeMarkdown(doc: MindDoc): string {
       ensureBlank();
       pushBlock(normalizeNote(node.note));
     }
-    const kids = node.children;
+    // 链接展开的虚拟子树只存在于画布上，绝不写回文件
+    const kids = node.children.filter((c) => !isVirtualNode(c));
     const headingKids = kids.filter((c) => c.kind === "heading" && level < 6);
     // 列表子节点先于标题子节点写出（标题会吞掉后面所有列表，顺序只能如此）
     const listKids = kids.filter((c) => !headingKids.includes(c));
@@ -481,7 +482,10 @@ export function serializeMarkdown(doc: MindDoc): string {
     if (node.note) {
       for (const l of normalizeNote(node.note).split("\n")) out.push(l === "" ? "" : `${style.indent.repeat(depth + 1)}${l}`);
     }
-    for (const c of node.children) emitList(c, depth + 1);
+    for (const c of node.children) {
+      if (isVirtualNode(c)) continue;
+      emitList(c, depth + 1);
+    }
   };
 
   const root = doc.root;
@@ -493,8 +497,10 @@ export function serializeMarkdown(doc: MindDoc): string {
       pushBlock(normalizeNote(root.note));
     }
     const level = Math.max(1, root.level + 1);
-    const headingKids = root.children.filter((c) => c.kind === "heading");
-    const listKids = root.children.filter((c) => c.kind !== "heading");
+    // 根上也可能挂着链接展开的虚拟子树，同样跳过
+    const realKids = root.children.filter((c) => !isVirtualNode(c));
+    const headingKids = realKids.filter((c) => c.kind === "heading");
+    const listKids = realKids.filter((c) => c.kind !== "heading");
     if (listKids.length) {
       if (root.note) ensureBlank();
       for (const c of listKids) emitList(c, 0);
@@ -517,7 +523,11 @@ export function normalizeKinds(doc: MindDoc): void {
       if (!parentIsHeading || parentLevel >= 6) node.kind = "list";
       else node.level = parentLevel + 1;
     }
-    for (const c of node.children) fix(c, node.level, node.kind === "heading");
+    for (const c of node.children) {
+      // 虚拟子树的层级来自目标笔记自己的结构，不参与源文档的规范化
+      if (isVirtualNode(c)) continue;
+      fix(c, node.level, node.kind === "heading");
+    }
   };
   const rootLevel = doc.rootFromHeading ? 1 : doc.root.level;
   doc.root.level = rootLevel;

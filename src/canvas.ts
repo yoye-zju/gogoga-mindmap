@@ -9,6 +9,7 @@ import {
   attachSubtree,
   findByPath,
   isAncestor,
+  isVirtualNode,
   MindDoc,
   MindNode,
   moveNode,
@@ -91,6 +92,17 @@ export interface CanvasHost {
   notice?: (message: string) => void;
   /** 用宿主的样式显示提示（Obsidian 的 setTooltip）；没有就退回原生 title */
   setTooltip?: (el: HTMLElement, text: string, placement: TooltipPlacement) => void;
+  /**
+   * 链接展开徽标的状态：none 不显示（功能关闭或不可展开），collapsed 显示展开徽标，
+   * expanded 显示收起徽标。每次 rebuild 都会问一遍，状态变化由签名机制触发重画。
+   */
+  linkBadgeState?: (node: MindNode) => "none" | "collapsed" | "expanded";
+  /** 点了链接节点上的展开徽标（展开还是收起由宿主按当前状态决定，幂等） */
+  toggleLink?: (node: MindNode) => void;
+  /** 点了「展开更多」占位节点（只出现在被截断的虚拟子树末尾） */
+  expandMore?: (moreNode: MindNode) => void;
+  /** 点了虚拟子树根上的「打开目标」按钮 */
+  openVirtualTarget?: (virtualRoot: MindNode) => void;
 }
 
 export type TooltipPlacement = "top" | "right" | "bottom" | "left";
@@ -817,9 +829,10 @@ export class MindMapCanvas {
     const visit = (node: MindNode) => {
       const rel = node.depth - base.depth;
       const branch = theme.branchColors ? branchOf.get(node.id) : undefined;
+      const badgeState = this.opts.host?.linkBadgeState?.(node) ?? "none";
       // 内容签名管子节点，整体签名再叠上纯表现的部分（选中、配色、层级）；
       // 只有前者变了才重建 DOM，选一下节点不该把里面的 iframe 打回重载
-      const contentSig = [node.text, node.note ? "n" : "", node.folded ? "f" : "", node.children.length, this.opts.theme].join("\u0001");
+      const contentSig = [node.text, node.note ? "n" : "", node.folded ? "f" : "", node.children.length, badgeState, this.opts.theme].join("\u0001");
       const sig = [
         contentSig,
         node.color ?? "",
@@ -929,6 +942,9 @@ export class MindMapCanvas {
       } else if (el.dataset.link) {
         delete el.dataset.link;
       }
+      // 链接展开的虚拟子树：只读展示，样式上与真实节点区分开
+      if (isVirtualNode(node)) el.classList.add("is-virtual");
+      if (node.moreNode) el.classList.add("is-more-node");
 
       if (!keepChildren && node.note) {
         const n = icon("note");
@@ -955,6 +971,40 @@ export class MindMapCanvas {
           this.toggleFold(node);
         });
         el.append(toggle);
+      }
+
+      // 链接展开：徽标（展开/收起）与虚拟根上的「打开目标」按钮。
+      // 监听器里不捕获 node，改成点击时按元素 id 现查：元素被复用到新树上时也不会
+      // 点到过期的节点对象（这正是「再点一下收不起来」的根源之一）
+      if (!keepChildren && badgeState !== "none") {
+        const badge = createEl("button");
+        badge.className = "mm-expand-badge" + (badgeState === "expanded" ? " is-expanded" : "");
+        badge.type = "button";
+        badge.append(icon("layers"));
+        this.tip(badge, badgeState === "expanded" ? t("canvas.collapseSubtree") : t("canvas.expandSubtree"));
+        badge.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        badge.addEventListener("dblclick", (ev) => ev.stopPropagation());
+        badge.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          // 展开要等一次文件读取：先给反馈，别让人以为没点上
+          badge.classList.add("is-loading");
+          window.setTimeout(() => badge.classList.remove("is-loading"), 600);
+          const live = this.nodeFromEl(el);
+          if (live) this.opts.host?.toggleLink?.(live);
+        });
+        el.append(badge);
+      }
+      if (!keepChildren && node.virtual && node.linkRef && !node.moreNode) {
+        const open = icon("open");
+        open.classList.add("mm-open-target");
+        this.tip(open, t("canvas.openTarget"));
+        open.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+        open.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          const live = this.nodeFromEl(el);
+          if (live) this.opts.host?.openVirtualTarget?.(live);
+        });
+        el.append(open);
       }
 
       if (!reused) this.nodesEl.append(el);
@@ -1222,7 +1272,8 @@ export class MindMapCanvas {
     if (!this.opts.editable) return;
     const byParent = new Map<MindNode, number[]>();
     for (const n of this.selected) {
-      if (!n.parent || this.boxOf(n)) continue;
+      // 外框按兄弟下标算跨度，虚拟节点混进来会把框画到真实兄弟头上
+      if (!n.parent || this.boxOf(n) || isVirtualNode(n)) continue;
       const arr = byParent.get(n.parent) ?? [];
       arr.push(n.parent.children.indexOf(n));
       byParent.set(n.parent, arr);
@@ -1432,7 +1483,7 @@ export class MindMapCanvas {
     if (!this.opts.editable) return;
     const byParent = new Map<MindNode, number[]>();
     for (const n of this.selected) {
-      if (!n.parent || this.summaryOf(n)) continue;
+      if (!n.parent || this.summaryOf(n) || isVirtualNode(n)) continue;
       const arr = byParent.get(n.parent) ?? [];
       arr.push(n.parent.children.indexOf(n));
       byParent.set(n.parent, arr);
@@ -2043,7 +2094,9 @@ export class MindMapCanvas {
   private positionNodebar(): void {
     this.updateImageHandle();
     if (!this.opts.editable) return;
-    const show = this.primary && this.selected.size > 0 && !this.editing && !this.drag && !this.marquee && this.els.has(this.primary.id);
+    // 虚拟节点是只读副本：不给浮动工具栏，免得满排按钮点下去全没反应
+    const show =
+      this.primary && this.selected.size > 0 && !this.editing && !this.drag && !this.marquee && this.els.has(this.primary.id) && !isVirtualNode(this.primary);
     if (!show) {
       this.nodebar?.remove();
       this.nodebar = null;
@@ -2076,7 +2129,10 @@ export class MindMapCanvas {
 
   private applyColor(color: string | null): void {
     if (!this.selected.size) return;
-    for (const n of this.selected) n.color = color ?? undefined;
+    for (const n of this.selected) {
+      if (isVirtualNode(n)) continue; // 虚拟子树的颜色跟着目标笔记走
+      n.color = color ?? undefined;
+    }
     this.render();
     this.notify();
   }
@@ -2125,6 +2181,12 @@ export class MindMapCanvas {
       if (nodeEl) {
         const node = this.nodeFromEl(nodeEl);
         if (!node) return;
+        // 「展开更多」占位节点：一击就走，不参与选中/拖拽
+        if (node.moreNode) {
+          this.el.focus({ preventScroll: true });
+          this.opts.host?.expandMore?.(node);
+          return;
+        }
         if (this.editing === node) return;
         if (this.editing) this.commitEdit();
         this.closePopover();
@@ -2908,6 +2970,8 @@ export class MindMapCanvas {
   // ---------- 拖拽 ----------
 
   private startDrag(node: MindNode, ev: PointerEvent): void {
+    // 虚拟子树只读：不许拖走，也不许把它当拖拽源
+    if (isVirtualNode(node)) return;
     const el = this.els.get(node.id);
     if (!el || !this.doc) return;
     const subtree = new Set<MindNode>();
@@ -2987,7 +3051,8 @@ export class MindMapCanvas {
    */
   private findDropTarget(wx: number, wy: number, exclude: Set<MindNode>): DropTarget | null {
     if (!this.layout) return null;
-    const placed = [...this.layout.placed.values()].filter((p) => !exclude.has(p.node));
+    // 虚拟节点不能当落点：真实节点混进虚拟子树会被序列化守卫丢弃，等于丢数据
+    const placed = [...this.layout.placed.values()].filter((p) => !exclude.has(p.node) && !isVirtualNode(p.node));
     let hit: Placed | null = null;
     for (const p of placed) {
       if (wx >= p.x && wx <= p.x + p.w && wy >= p.y && wy <= p.y + p.h && (!hit || p.w * p.h < hit.w * hit.h)) hit = p;
@@ -3170,14 +3235,14 @@ export class MindMapCanvas {
   // ---------- 供大纲面板与快捷键调用的树操作 ----------
 
   renameNode(node: MindNode, text: string): void {
-    if (!this.opts.editable || text === node.text) return;
+    if (!this.opts.editable || text === node.text || isVirtualNode(node)) return;
     node.text = text;
     this.render();
     this.notify();
   }
 
   insertSibling(node: MindNode): MindNode | null {
-    if (!this.opts.editable || !node.parent) return null;
+    if (!this.opts.editable || !node.parent || isVirtualNode(node)) return null;
     if (this.editing) this.commitEdit();
     const created = addSibling(node, "", true);
     if (!created) return null;
@@ -3187,7 +3252,7 @@ export class MindMapCanvas {
   }
 
   insertChild(node: MindNode): MindNode | null {
-    if (!this.opts.editable || !this.doc) return null;
+    if (!this.opts.editable || !this.doc || isVirtualNode(node)) return null;
     if (this.editing) this.commitEdit();
     if (node.folded) node.folded = false;
     const created = addChild(node, this.doc.style, "");
@@ -3277,7 +3342,8 @@ export class MindMapCanvas {
   }
 
   private deleteSelected(): void {
-    const victims = [...this.selected].filter((n) => n.parent && ![...this.selected].some((o) => o !== n && isAncestor(o, n)));
+    // 虚拟节点只读：删除操作整体跳过它们
+    const victims = [...this.selected].filter((n) => !isVirtualNode(n) && n.parent && ![...this.selected].some((o) => o !== n && isAncestor(o, n)));
     if (!victims.length) return;
     const primary = this.primary && victims.includes(this.primary) ? this.primary : victims[0];
     const parent = primary.parent!;
@@ -3291,6 +3357,7 @@ export class MindMapCanvas {
 
   startEdit(node: MindNode, isNew = false): void {
     if (!this.opts.editable) return;
+    if (isVirtualNode(node)) return; // 虚拟子树只读，双击/回车都进不了编辑
     if (this.editing === node) return;
     if (this.editing) this.commitEdit();
     const el = this.els.get(node.id);
@@ -3779,7 +3846,7 @@ export class MindMapCanvas {
 
   /** 选区里去掉被其他选中节点包含的，按文档顺序排列 */
   private topLevelSelection(): MindNode[] {
-    const all = [...this.selected];
+    const all = [...this.selected].filter((n) => !isVirtualNode(n)); // 复制/剪切不带走虚拟子树
     const tops = all.filter((n) => n.parent && !all.some((o) => o !== n && isAncestor(o, n)));
     const key = (n: MindNode) => pathOf(n).split("/").map((x) => Number(x));
     return tops.sort((a, b) => {
@@ -3827,6 +3894,8 @@ export class MindMapCanvas {
     if (!nodes.length) return;
     if (this.editing) this.commitEdit();
     const target = this.primary ?? this.doc.root;
+    // 粘贴进虚拟子树的内容会被序列化守卫丢弃，等于丢数据
+    if (isVirtualNode(target)) return;
     if (target.folded) target.folded = false;
     for (const n of nodes) attachSubtree(n, target, this.doc.style);
     this.select(null);
@@ -3840,7 +3909,7 @@ export class MindMapCanvas {
   /** 已链接：弹菜单（打开 / 取消链接）；未链接：挑一篇笔记或新建，把标签变成 [[笔记|原文]] */
   async linkSelectedToNote(): Promise<void> {
     const node = this.primary;
-    if (!node || !this.opts.editable || this.linkMenu || this.linking) return;
+    if (!node || !this.opts.editable || isVirtualNode(node) || this.linkMenu || this.linking) return;
     const link = wikilinkOf(node.text);
     if (link) {
       const anchor = this.nodebar?.querySelector<HTMLElement>('.mm-tool[data-tool="link"]') ?? this.els.get(node.id);
@@ -3871,6 +3940,7 @@ export class MindMapCanvas {
   }
 
   applyNoteLink(node: MindNode, basename: string): void {
+    if (isVirtualNode(node)) return;
     const text = plainText(node.text).trim();
     node.text = !text || text === basename ? `[[${basename}]]` : `[[${basename}|${text}]]`;
     this.select(node);
@@ -3879,6 +3949,7 @@ export class MindMapCanvas {
   }
 
   unlinkNote(node: MindNode): void {
+    if (isVirtualNode(node)) return;
     const link = wikilinkOf(node.text);
     if (!link) return;
     node.text = link.alias ?? link.target;
@@ -3941,6 +4012,21 @@ export class MindMapCanvas {
     const editable = this.opts.editable;
     const link = wikilinkOf(node.text);
     const sep: MenuEntry = { separator: true };
+    // 虚拟子树只读：只给浏览类动作，不给任何会改树的入口
+    if (isVirtualNode(node)) {
+      const entries: MenuEntry[] = [];
+      if (node.linkRef && !node.moreNode) {
+        const target = node.linkRef.target;
+        entries.push({ title: t("menu.openLink", { target }), icon: "file-text", run: () => this.opts.host?.openVirtualTarget?.(node) });
+      }
+      if (node.children.length) entries.push({ title: `${node.folded ? t("menu.expand") : t("menu.collapse")}  /`, icon: node.folded ? "chevron-down" : "chevron-right", run: () => this.toggleFold(node) });
+      entries.push(
+        { title: t("menu.focusBranch"), icon: "focus", disabled: !node.children.length, run: () => this.focusOn(node) },
+        { title: t("menu.fitBranch"), icon: "scan", run: () => this.fitBranch(node) },
+        { title: t("menu.copy"), icon: "copy", run: () => this.copySelection() },
+      );
+      return entries;
+    }
     const entries: MenuEntry[] = [];
     if (editable) {
       entries.push(
@@ -4010,7 +4096,7 @@ export class MindMapCanvas {
   }
 
   private convertLevel(node: MindNode, kind: "heading" | "list"): void {
-    if (!this.doc || !this.opts.editable) return;
+    if (!this.doc || !this.opts.editable || isVirtualNode(node)) return;
     if (!convertLevelKind(node, kind, this.doc.style)) {
       this.opts.host?.notice?.(t("notice.cannotHeading"));
       return;
@@ -4023,6 +4109,7 @@ export class MindMapCanvas {
     if (!this.opts.editable || !this.selected.size) return;
     const primaryHas = this.primary ? /^\[( |x|X)\]\s/.test(splitMarkers(this.primary.text).rest) : false;
     for (const n of this.selected) {
+      if (isVirtualNode(n)) continue;
       const has = /^\[( |x|X)\]\s/.test(splitMarkers(n.text).rest);
       if (has === primaryHas) n.text = toggleTask(n.text, "add-remove");
     }
@@ -4033,6 +4120,7 @@ export class MindMapCanvas {
   /** 选中节点整体加粗/斜体：包一层或去掉一层 */
   private toggleInlineStyle(wrap: "**" | "*"): void {
     for (const n of this.selected) {
+      if (isVirtualNode(n)) continue;
       const { markers, rest } = splitMarkers(n.text);
       const inner = rest.startsWith(wrap) && rest.endsWith(wrap) && rest.length > wrap.length * 2 ? rest.slice(wrap.length, -wrap.length) : `${wrap}${rest}${wrap}`;
       n.text = [...markers, inner].join(" ");
@@ -4073,7 +4161,10 @@ export class MindMapCanvas {
         b.textContent = emoji;
         b.addEventListener("click", (ev) => {
           ev.stopPropagation();
-          for (const n of this.selected) n.text = toggleMarker(n.text, emoji);
+          for (const n of this.selected) {
+            if (isVirtualNode(n)) continue;
+            n.text = toggleMarker(n.text, emoji);
+          }
           this.closeMarkerPicker();
           this.render();
           this.notify();
@@ -4169,7 +4260,7 @@ export class MindMapCanvas {
   // ---------- 拖入与图片粘贴 ----------
 
   private async handleDrop(ev: DragEvent, target: MindNode): Promise<void> {
-    if (!this.doc) return;
+    if (!this.doc || isVirtualNode(target)) return; // 虚拟子树不接受拖入
     const vaultFiles = this.opts.host?.getDraggedFiles?.() ?? null;
     const created: MindNode[] = [];
     if (vaultFiles?.length) {
@@ -4198,7 +4289,7 @@ export class MindMapCanvas {
 
   /** 把图片文件存成附件并作为子节点插入 */
   private async insertImageFiles(files: File[], target: MindNode | null): Promise<void> {
-    if (!this.doc || !target) return;
+    if (!this.doc || !target || isVirtualNode(target)) return;
     const save = this.opts.host?.saveBinary;
     if (!save) {
       this.opts.host?.notice?.(t("notice.saveImageUnsupported"));
@@ -4227,6 +4318,8 @@ export class MindMapCanvas {
   // ---------- 复制节点链接 ----------
 
   async copyNodeLink(node: MindNode): Promise<void> {
+    // 虚拟节点的内容属于目标笔记，复制「本文件的块链接」没有意义
+    if (isVirtualNode(node)) return;
     const base = this.opts.host?.fileBasename?.();
     if (!base) return;
     let link: string;

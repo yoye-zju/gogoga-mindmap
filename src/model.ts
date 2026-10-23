@@ -33,9 +33,20 @@ export interface MindNode {
   bullet: string;
   /** Obsidian 块引用 id（列表项末尾的 ^abc123），用于 [[笔记#^id]] */
   blockId?: string;
+  /** 属于链接展开的虚拟子树：只读展示，绝不序列化回 Markdown */
+  virtual?: boolean;
+  /** 链接节点记录的展开目标（[[笔记#小节]] 的目标与小节），供刷新/恢复用 */
+  linkRef?: { target: string; subpath?: string };
+  /** 「展开更多」占位节点：点击后对所属的链接节点继续下挖 */
+  moreNode?: boolean;
   children: MindNode[];
   parent: MindNode | null;
   depth: number;
+}
+
+/** 虚拟节点（含其整个子树）只用于展示，任何写回路径都必须跳过 */
+export function isVirtualNode(node: MindNode): boolean {
+  return node.virtual === true;
 }
 
 export const NODE_MIN_WIDTH = 60;
@@ -101,6 +112,9 @@ export function createNode(init: Partial<MindNode> & { parent: MindNode | null }
     level: init.level ?? 0,
     bullet: init.bullet ?? "",
     blockId: init.blockId,
+    virtual: init.virtual,
+    linkRef: init.linkRef,
+    moreNode: init.moreNode,
     children: init.children ?? [],
     parent,
     depth: parent ? parent.depth + 1 : 0,

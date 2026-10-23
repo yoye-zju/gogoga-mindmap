@@ -36,6 +36,8 @@ export interface MindMapSettings {
   wheelAction: "pan" | "zoom";
   /** 切换成脑图时往 frontmatter 写 mindmap: true，以后都用脑图打开；关掉则只换当前显示 */
   rememberView: boolean;
+  /** 链接节点展开目标笔记子树时保留的层级（1–5） */
+  linkExpandDepth: number;
 }
 
 export type ToolbarPosition = "bottom" | "top" | "left" | "right";
@@ -57,6 +59,7 @@ export const DEFAULT_SETTINGS: MindMapSettings = {
   toolbarPosition: "bottom",
   wheelAction: "pan",
   rememberView: true,
+  linkExpandDepth: 2,
   customThemes: [],
   listIcon: MINDMAP_LIST_ICON,
 };
@@ -132,6 +135,20 @@ export class MindMapSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.indent)
           .onChange(async (v) => {
             this.plugin.settings.indent = v as MindMapSettings["indent"];
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    // 链接展开深度：滑块 1–5
+    new Setting(containerEl)
+      .setName(t("settings.linkExpand.name"))
+      .setDesc(t("settings.linkExpand.desc"))
+      .addSlider((s) =>
+        s
+          .setLimits(1, 5, 1)
+          .setValue(Math.max(1, Math.min(5, Math.floor(Number(this.plugin.settings.linkExpandDepth) || 2))))
+          .onChange(async (v) => {
+            this.plugin.settings.linkExpandDepth = v;
             await this.plugin.saveSettings();
           }),
       );
